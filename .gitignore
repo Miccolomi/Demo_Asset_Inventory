@@ -1,0 +1,16 @@
+# Dipendenze Node
+backend/node_modules/
+
+# Variabili d'ambiente (contengono URI MongoDB e URL Ollama)
+backend/.env
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Claude Code
+.claude/
+
+# Log
+*.log
+npm-debug.log*
