@@ -251,6 +251,16 @@
     /* Shared */
     .text-muted { color: #64748b; font-size: 12px; }
     hr.dark { border: none; border-top: 1px solid #334155; margin: 0; }
+
+    /* ── TRALICCIO DETAILS PANEL ── */
+    #trl-details {
+      display: none; border-top: 2px solid #e2e8f0;
+      background: #f8fafc; padding: 14px 16px; flex-shrink: 0;
+    }
+    #trl-details .det-section-title {
+      font-size: 10px; font-weight: 700; color: #7c3aed;
+      text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px;
+    }
   </style>
 </head>
 <body>
@@ -423,6 +433,10 @@
         <button class="btn-ghost" onclick="closeForm()">Annulla</button>
         <button class="btn-primary" onclick="saveTraliccio()">Salva</button>
       </div>
+
+      <!-- Apparati collegati — popolato da renderTraliccioDetails() -->
+      <div id="trl-details"></div>
+
     </div>
 
   </div><!-- /crud-panel -->
@@ -494,6 +508,16 @@
       </button>
       <input class="q-input" id="q-vector-input" type="text" placeholder="es: traliccio alta tensione guasto"
         onkeydown="if(event.key==='Enter') runQuery('semantic')" style="flex: none; width: 200px;">
+    </div>
+    <div class="q-search-wrap">
+      <button class="q-btn" style="background:#0f172a; min-width:0; padding:8px 12px;" onclick="runQuery('grafo')" id="qbtn-grafo"
+        data-tip="K · $graphLookup — Traversal del grafo elettrico. Partendo da un traliccio, percorre la catena di tratte DigiC in avanti fino a N hop. Operatore nativo MongoDB per graph traversal senza database a grafo dedicato. Clicca un pin sulla mappa o digita il codice.">
+        <span class="q-desc">Catena elettrica</span>
+      </button>
+      <input class="q-input" id="q-grafo-input" type="text" placeholder="Codice traliccio"
+        onkeydown="if(event.key==='Enter') runQuery('grafo')" style="flex: none; width: 130px;">
+      <input class="q-input" id="q-grafo-hops" type="number" min="1" max="20" value="5" title="N° hop"
+        onkeydown="if(event.key==='Enter') runQuery('grafo')" style="flex: none; width: 55px;">
     </div>
     <button onclick="resetMonitorMap()" style="margin-left:auto; padding:6px 12px; background:transparent; border:1px solid #cbd5e1; color:#64748b; border-radius:6px; font-size:11px; cursor:pointer;">↺ reset mappa</button>
     <div id="query-desc-bar"></div>

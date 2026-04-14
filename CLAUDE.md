@@ -4,22 +4,24 @@
 ---
 
 ## Obiettivo del Progetto
-Demo SPA per mostrare le capacità di MongoDB nella gestione di infrastrutture elettriche (Smart Grid). L'app simula un "Digital Twin" di tralicci ad alta tensione con IoT Box per la telemetria, lungo una tratta reale dell'appennino italiano.
+Demo SPA per mostrare le capacità di MongoDB nella gestione di infrastrutture elettriche (Smart Grid). L'app simula un "Digital Twin" di tralicci ad alta tensione con IoT Box per la telemetria, lungo la dorsale elettrica appenninica italiana.
 
-**Scopo principale:** far vedere MongoDB in azione (geospaziale, aggregation pipeline, lookup), non costruire un prodotto. Tieni tutto semplice.
+**Scopo principale:** far vedere MongoDB in azione (geospaziale, aggregation pipeline, $lookup, $facet, Atlas Search, Vector Search + LLM) in un contesto realistico. Non costruire un prodotto — tieni tutto semplice.
 
 ---
 
 ## Stack Tecnologico
 | Layer | Tecnologia | Note |
 |---|---|---|
-| Database | MongoDB Atlas (o locale) | Stringa di connessione via `.env` |
+| Database | MongoDB (replica set locale) | Stringa di connessione via `.env` |
 | Backend | Node.js + Express.js | Mongoose per i modelli |
 | Frontend | **Vanilla JS + HTML + CSS** | No React, no build step. SPA con fetch() |
 | Mappe | Leaflet.js (CDN) | |
-| Stile | Tailwind CSS (CDN) | |
+| Stile | CSS inline in index.html | Niente Tailwind CDN attualmente |
+| Embeddings | Ollama (`nomic-embed-text`, 768-dim) | Gira in locale su http://localhost:11434 |
+| LLM | Ollama (`llama3.2:latest`) | Usato per sintesi risposta nella Query J |
 
-> **Perché Vanilla JS:** È una demo, non un prodotto. Nessun `npm run build`, nessuna configurazione webpack. Il browser carica direttamente `index.html` puntando al backend Express.
+> **Perché Vanilla JS:** È una demo, non un prodotto. Nessun `npm run build`. Express serve il frontend come static files.
 
 ---
 
@@ -29,50 +31,55 @@ Demo SPA per mostrare le capacità di MongoDB nella gestione di infrastrutture e
 /
 ├── backend/
 │   ├── server.js            # Entry point Express
-│   ├── .env                 # MONGODB_URI, PORT
+│   ├── .env                 # MONGODB_URI, PORT, OLLAMA_URL, OLLAMA_CHAT_MODEL
+│   ├── package.json         # Dipendenze: express, mongoose, dotenv, cors
 │   ├── models/
-│   │   ├── Traliccio.js
-│   │   ├── AggettIoTBox.js
-│   │   ├── DigiCBox.js
-│   │   └── DigiLBox.js
+│   │   ├── Traliccio.js     # Schema + indici 2dsphere, stato_operativo, regione
+│   │   ├── AggettIoTBox.js  # Schema + indici su traliccio_collegato_id, batteria, allarmi, telemetria
+│   │   ├── DigiCBox.js      # Schema + indici su regione+stato, traliccio_da/a_id+stato
+│   │   └── DigiLBox.js      # Schema semplice, no indici extra
 │   └── routes/
-│       ├── seed.js          # POST /api/seed
-│       └── queries.js       # GET /api/query/*
+│       ├── seed.js          # POST /api/seed — genera 10.000 tralicci con embedding Ollama
+│       └── queries.js       # GET /api/query/* — 10 query showcase (A→J) + CRUD tralicci
 ├── frontend/
-│   ├── index.html           # Tutto il markup SPA
-│   ├── app.js               # Logica JS (fetch, Leaflet, tab switching)
-│   └── style.css            # Override minimi su Tailwind
-└── package.json             # Solo dipendenze backend
+│   ├── index.html           # SPA completa (522 righe), CSS inline, 3 tab
+│   └── app.js               # Logica JS (867 righe): fetch, Leaflet, tab, CRUD, query rendering
+└── CLAUDE.md
 ```
+
+> **Nota:** non esiste `style.css` separato — gli stili sono inline in `index.html`.
 
 ---
 
 ## Struttura del Database (4 Collections)
 
 ### 1. `tralicci`
-Sostegni fisici della linea elettrica.
 ```js
 {
-  codice: String,           // es. "TRL-042"
+  codice: String,           // es. "TRL-00042"
   nome: String,             // es. "Traliccio Appennino Nord 42"
-  tipologia: String,        // "Monostelo" | "Traliccio a portale" | "Traliccio a Y"
+  tipologia: String,        // "Monostelo" | "Traliccio a portale" | "Traliccio a Y" | ...
   tensione_kv: Number,      // 132 | 220 | 380
-  regione: String,          // "Lazio" | "Campania" | "Toscana" ecc.
+  regione: String,          // "Lazio" | "Campania" | "Toscana" | "Calabria" ecc.
   stato_operativo: String,  // "attivo" | "in_manutenzione" | "fuori_servizio"
   anno_installazione: Number,
+  descrizione: String,      // testo libero per full-text search e embedding
   gis_location: {           // GeoJSON — OBBLIGATORIO per indice 2dsphere
     type: "Point",
-    coordinates: [lng, lat] // Attenzione: longitude PRIMA di latitude (standard GeoJSON)
-  }
+    coordinates: [lng, lat] // ATTENZIONE: longitude PRIMA di latitude (standard GeoJSON)
+  },
+  embedding: [Number]       // vettore 768-dim (nomic-embed-text via Ollama), select:false
 }
-// Indice: { gis_location: "2dsphere" }
+// Indici:
+//   { gis_location: '2dsphere' }
+//   { stato_operativo: 1 }
+//   { regione: 1, stato_operativo: 1 }
 ```
 
 ### 2. `aggetto_iot_box`
-Sensori montati su ogni traliccio.
 ```js
 {
-  codice: String,                    // es. "IOT-042"
+  codice: String,                    // es. "IOT-00042"
   traliccio_collegato_id: ObjectId,  // ref -> tralicci
   firmware_version: String,
   livello_batteria: Number,          // 0-100 (%)
@@ -84,13 +91,18 @@ Sensori montati su ogni traliccio.
     vibrazione_hz: Number
   }
 }
+// Indici:
+//   { traliccio_collegato_id: 1 }
+//   { livello_batteria: 1 }
+//   { allarmi_attivi: 1 }
+//   { 'telemetria.vibrazione_hz': 1 }
+//   { 'telemetria.temperatura_celsius': 1 }
 ```
 
 ### 3. `digic_box`
-Box di controllo per una tratta di cavo (segmento tra due tralicci consecutivi).
 ```js
 {
-  codice: String,                 // es. "DIGIC-009"
+  codice: String,                 // es. "DIGIC-00009"
   traliccio_da_id: ObjectId,      // ref -> tralicci
   traliccio_a_id: ObjectId,       // ref -> tralicci
   regione: String,
@@ -100,14 +112,17 @@ Box di controllo per una tratta di cavo (segmento tra due tralicci consecutivi).
   corrente_ampere: Number,
   stato: String                   // "normale" | "sovraccarico" | "guasto"
 }
+// Indici:
+//   { regione: 1, stato: 1 }
+//   { traliccio_da_id: 1, stato: 1 }
+//   { traliccio_a_id: 1, stato: 1 }
 ```
 
 ### 4. `digil_box`
-Box di controllo per una linea intera (aggregazione di più tratte).
 ```js
 {
   codice: String,               // es. "DIGIL-001"
-  nome_linea: String,           // es. "Linea 380kV Roma-Napoli"
+  nome_linea: String,           // es. "Linea 380kV Bologna-Firenze"
   regioni_attraversate: [String],
   numero_tralicci: Number,
   numero_tratte: Number,
@@ -119,30 +134,32 @@ Box di controllo per una linea intera (aggregazione di più tratte).
 
 ---
 
-## Dati di Seed
+## Dati di Seed (`POST /api/seed`)
+
+### Volumi
+- **10.000 tralicci** georeferenziati
+- **10.000 IoT Box** (1 per traliccio)
+- **9.999 DigiC Box** (1 per ogni coppia di tralicci consecutivi)
+- **7 DigiL Box** (linee aggregazione)
 
 ### Rotta Simulata
-Genera **30 tralicci** lungo la tratta appenninica **Firenze → Roma → Napoli** (autostrada A1, dorsale elettrica reale).
-
-Coordinate di riferimento per la rotta (interpola linearmente tra questi punti):
-- Firenze: `[11.2558, 43.7696]`
-- Arezzo: `[11.8817, 43.4636]`
-- Orvieto: `[12.1097, 42.7189]`
-- Roma Nord: `[12.4964, 41.9028]`
-- Frosinone: `[13.3535, 41.6401]`
-- Caserta: `[14.3328, 41.0736]`
-- Napoli: `[14.2681, 40.8518]`
-
-Aggiungi offset random `±0.05°` a ogni traliccio per realismo.
+Dorsale elettrica appenninica italiana **Bologna → Reggio Calabria** con waypoint intermedi. Ogni traliccio ha offset random ±0.05° per realismo.
 
 ### Distribuzione stati operativi (random pesato):
 - 70% `attivo`
 - 20% `in_manutenzione`
 - 10% `fuori_servizio`
 
-### DigiC Box: crea una tratta ogni 2 tralicci consecutivi (29 tratte totali).
+### Embedding
+Ogni traliccio riceve un embedding 768-dim generato da Ollama (`nomic-embed-text`) sul testo:
+`"{tipologia} {regione} tensione {tensione_kv}kV stato {stato_operativo} {descrizione}"`
 
-### DigiL Box: crea 2 linee (una per il tratto nord, una per il sud).
+Il seed usa batching per evitare di sovraccaricare Ollama. Usa **756 template pre-calcolati** (combinazioni tipologia × regione × stato × tensione × categoria età) per minimizzare le chiamate Ollama e velocizzare il seed.
+
+Il seed crea anche gli indici Atlas Search (full-text e vector) tramite `createSearchIndex` / `createIndex`.
+
+### Idempotenza
+`deleteMany({})` su tutte le collection prima di inserire — il bottone Admin funziona più volte.
 
 ---
 
@@ -152,271 +169,200 @@ Aggiungi offset random `±0.05°` a ogni traliccio per realismo.
 ```
 POST /api/seed
 ```
-Svuota le 4 collection con `deleteMany({})` e ri-popola. Risponde con:
-```json
-{
-  "success": true,
-  "counts": {
-    "tralicci": 30,
-    "iot_boxes": 30,
-    "digic_boxes": 29,
-    "digil_boxes": 2
-  }
-}
+Risponde con conteggi dopo il completamento.
+
+### CRUD Tralicci (Tab Anagrafica)
+```
+GET    /api/tralicci                   → 500 campione random per la mappa
+GET    /api/tralicci/search?q=&page=1&limit=50  → ricerca + paginazione lista CRUD
+GET    /api/tralicci/:id               → dettaglio singolo
+GET    /api/tralicci/:id/details       → IoT Box + tratte DigiC adiacenti + linea DigiL
+POST   /api/tralicci                   → crea nuovo
+PUT    /api/tralicci/:id               → aggiorna
+DELETE /api/tralicci/:id               → elimina
 ```
 
-### Query MongoDB (showcase)
+### Query MongoDB (showcase — Tab Monitor)
 ```
-GET /api/query/geo          → Query A: Geospaziale ($near)
-GET /api/query/allarmi      → Query B: Aggregation + $lookup
-GET /api/query/stats-cavi   → Query C: $group + $avg per regione
-GET /api/query/kpi-linea    → Query D: $facet (multi-dimensionale)
-GET /api/query/search       → Query E: Full-Text Search (Atlas Search on-prem)
-GET /api/query/semantic     → Query F: Vector Search (Atlas Vector Search on-prem)
+GET  /api/query/kpi              → Query A: $facet (KPI Dashboard multidimensionale)
+GET  /api/query/geo              → Query B: $near geospaziale (parametri: city, km)
+GET  /api/query/allarmi          → Query C: $lookup + $unwind (IoT allarmi/batteria bassa)
+GET  /api/query/stats-cavi       → Query D: $group + $avg (temperatura cavi per regione)
+GET  /api/query/doppio-rischio   → Query E: $lookup pipeline (tralicci critici + tratte guaste)
+GET  /api/query/salute-linee     → Query F: aggregazione su 3 collection (DigiL + DigiC + Tralicci)
+GET  /api/query/stress-regione   → Query G: $group cross-collection (stress termico + % non attivi)
+GET  /api/query/iot-estrema      → Query H: IoT fuori soglia (vibrazione >30Hz o temp >55°C)
+GET  /api/query/search?q=        → Query I: Atlas Search full-text (lucene.italian, fuzzy maxEdits:1)
+POST /api/query/semantic         → Query J: Vector Search ($vectorSearch) + sintesi LLM (llama3.2)
+GET  /api/query/grafo?codice=&hops=5 → Query K: $graphLookup traversal catena elettrica
 ```
 
 ---
 
-## Le 6 Query MongoDB (core della demo)
+## Le 10 Query MongoDB (core della demo)
 
-### Query A — Geospaziale `$near`
-**"Tralicci in manutenzione entro 80km da Roma"**
-```js
-db.tralicci.find({
-  stato_operativo: "in_manutenzione",
-  gis_location: {
-    $near: {
-      $geometry: { type: "Point", coordinates: [12.4964, 41.9028] },
-      $maxDistance: 80000  // metri
-    }
-  }
-})
-```
+### Query A — `$facet` (KPI Dashboard)
+**"Statistiche globali in una singola query"**
+4 aggregazioni in parallelo: per stato, per regione, per tipologia, totale.
+*Mostra: $facet — risultati multipli con una sola chiamata al DB*
+
+### Query B — `$near` Geospaziale
+**"Tralicci in manutenzione entro X km da una città"**
+Input: città (coordinate predefinite) + raggio km.
 *Mostra: query geospaziale nativa, indice 2dsphere, filtro combinato*
 
-### Query B — `$lookup` (join tra collection)
-**"IoT Box con allarmi attivi o batteria sotto il 20%"**
-```js
-db.tralicci.aggregate([
-  {
-    $lookup: {
-      from: "aggetto_iot_boxes",
-      localField: "_id",
-      foreignField: "traliccio_collegato_id",
-      as: "iot"
-    }
-  },
-  { $unwind: "$iot" },
-  {
-    $match: {
-      $or: [
-        { "iot.livello_batteria": { $lt: 20 } },
-        { "iot.allarmi_attivi": { $not: { $size: 0 } } }
-      ]
-    }
-  },
-  {
-    $project: {
-      codice: 1,
-      stato_operativo: 1,
-      regione: 1,
-      "iot.codice": 1,
-      "iot.livello_batteria": 1,
-      "iot.allarmi_attivi": 1
-    }
-  }
-])
-```
+### Query C — `$lookup` + `$unwind`
+**"IoT Box con allarmi attivi o batteria < 20%"**
+Join tra `tralicci` e `aggetto_iot_box`.
 *Mostra: aggregation pipeline, $lookup cross-collection, $unwind, $match, $project*
 
-### Query C — `$group` + `$avg`
+### Query D — `$group` + `$avg`
 **"Temperatura media cavi per regione"**
-```js
-db.digic_boxes.aggregate([
-  {
-    $group: {
-      _id: "$regione",
-      temp_media: { $avg: "$temperatura_cavo_celsius" },
-      corrente_media: { $avg: "$corrente_ampere" },
-      num_tratte: { $sum: 1 },
-      tratte_in_sovraccarico: {
-        $sum: { $cond: [{ $eq: ["$stato", "sovraccarico"] }, 1, 0] }
-      }
-    }
-  },
-  { $sort: { temp_media: -1 } }
-])
-```
-*Mostra: $group, $avg, $sum con $cond, sorting*
+Su `digic_box`, raggruppa per regione con avg temperatura/corrente e count sovraccarichi.
+*Mostra: $group, $avg, $sum con $cond*
 
-### Query D — `$facet` (multi-dimensionale)
-**"KPI Dashboard: statistiche globali in una singola query"**
+### Query E — Doppio Rischio (`$lookup` pipeline)
+**"Tralicci non attivi che hanno anche tratte cavo in stato critico"**
+$lookup con pipeline su `digic_box` filtrando per stato guasto/sovraccarico.
+*Mostra: $lookup con sub-pipeline, filtri incrociati multi-collection*
+
+### Query F — Salute Linee Complete
+**"Stato di salute di ogni linea intera"**
+Per ogni DigiL aggrega DigiC e Tralicci collegati (3 collection).
+*Mostra: aggregazioni a cascata su 3 collection*
+
+### Query G — Stress per Regione
+**"Regioni con stress termico e alta % tralicci non attivi"**
+$group cross-collection: temperatura media cavi + percentuale tralicci non operativi.
+*Mostra: correlazione dati da collection diverse*
+
+### Query K — `$graphLookup` (catena elettrica)
+**"Percorri la rete elettrica partendo da un traliccio"**
 ```js
 db.tralicci.aggregate([
+  { $match: { codice: "TRL-00042" } },
   {
-    $facet: {
-      "per_stato": [
-        { $group: { _id: "$stato_operativo", count: { $sum: 1 } } }
-      ],
-      "per_regione": [
-        { $group: { _id: "$regione", count: { $sum: 1 } } },
-        { $sort: { count: -1 } }
-      ],
-      "per_tipologia": [
-        { $group: { _id: "$tipologia", count: { $sum: 1 } } }
-      ],
-      "totale": [
-        { $count: "n" }
-      ]
-    }
-  }
-])
-```
-*Mostra: $facet per ottenere 4 aggregazioni diverse con una sola chiamata al DB*
-
-### Query E — Atlas Search on-prem (full-text Lucene)
-**"Cerca tralicci per testo libero"** — es. input utente: `"monostelo campania"`
-```js
-db.tralicci.aggregate([
-  {
-    $search: {
-      index: "tralicci_search",   // indice Atlas Search da creare
-      text: {
-        query: "<input utente>",
-        path: ["nome", "tipologia", "regione"],
-        fuzzy: { maxEdits: 1 }    // tolleranza typo
-      }
+    $graphLookup: {
+      from: 'digic_box',
+      startWith: '$_id',
+      connectFromField: 'traliccio_a_id',
+      connectToField: 'traliccio_da_id',
+      as: 'catena',
+      maxDepth: 5,          // N hop in avanti
+      depthField: 'hop'     // profondità di ogni nodo trovato
     }
   },
+  // $lookup per risolvere i tralicci di destinazione
+  { $lookup: { from: 'tralicci', let: { ids: { $map: ... } }, pipeline: [...], as: 'tralicci_catena' } },
+  { $project: { ... } }
+])
+```
+*Mostra: $graphLookup per graph traversal nativo MongoDB — traversa digic_box in avanti (traliccio_da_id → traliccio_a_id) fino a N hop. Risultato visualizzato come tabella + polyline sulla mappa.*
+
+**UI:** input codice traliccio (auto-popolato cliccando un pin sulla mappa Monitor) + numero hop (default 5). Polyline blu disegnata sulla mappa con i tralicci nella catena.
+
+### Query H — IoT Fuori Soglia
+**"IoT con vibrazione >30Hz o temperatura >55°C"**
+Filtra `aggetto_iot_box` su telemetria estrema, correla con tratta cavo adiacente.
+*Mostra: $match su subdocumento, $lookup con filtro critico*
+
+### Query I — Atlas Search Full-Text
+**"Cerca tralicci per testo libero"** — es. "monostelo campania"
+```js
+db.tralicci.aggregate([
+  { $search: {
+      index: "tralicci_search",
+      text: { query: "<input>", path: ["nome","tipologia","regione","descrizione"], fuzzy: { maxEdits: 1 } }
+  }},
   { $limit: 10 },
-  {
-    $project: {
-      codice: 1, nome: 1, tipologia: 1, regione: 1,
-      stato_operativo: 1,
-      score: { $meta: "searchScore" }   // rilevanza Lucene
-    }
-  }
+  { $project: { codice:1, nome:1, tipologia:1, regione:1, stato_operativo:1, score:{$meta:"searchScore"} } }
 ])
 ```
-*Mostra: full-text search nativo in MongoDB (no Elasticsearch esterno), fuzzy matching, relevance score — disponibile on-prem con MongoDB Enterprise*
+*Mostra: full-text search nativo MongoDB, analyzer lucene.italian, fuzzy matching, relevance score*
 
-**Indice da creare** (una tantum, dopo il seed):
+**Indice Atlas Search:**
 ```json
 {
   "name": "tralicci_search",
   "definition": {
-    "mappings": {
-      "dynamic": false,
-      "fields": {
-        "nome":       { "type": "string", "analyzer": "lucene.italian" },
-        "tipologia":  { "type": "string", "analyzer": "lucene.italian" },
-        "regione":    { "type": "string", "analyzer": "lucene.italian" }
-      }
-    }
+    "mappings": { "dynamic": false, "fields": {
+      "nome":        { "type": "string", "analyzer": "lucene.italian" },
+      "tipologia":   { "type": "string", "analyzer": "lucene.italian" },
+      "regione":     { "type": "string", "analyzer": "lucene.italian" },
+      "descrizione": { "type": "string", "analyzer": "lucene.italian" }
+    }}
   }
 }
 ```
-Creare via `mongosh` con `db.tralicci.createSearchIndex(...)` oppure via endpoint dedicato `POST /api/admin/create-indexes`.
 
-### Query F — Atlas Vector Search on-prem (semantic search)
+### Query J — Vector Search + LLM (Semantic)
 **"Trova asset simili per descrizione semantica"**
-
-Ogni traliccio nel seed deve avere un campo `embedding` — vettore float32 di dimensione 384 generato da un modello leggero (es. `all-MiniLM-L6-v2` via `@xenova/transformers` o chiamata a un endpoint locale Ollama).
-
-Il testo da embeddare: `"{tipologia} {regione} tensione {tensione_kv}kV stato {stato_operativo}"`.
-
 ```js
+// 1. Genera embedding della query utente via Ollama (nomic-embed-text, 768-dim)
+// 2. $vectorSearch su indice 'tralicci_vector'
+// 3. Sintesi risultati con llama3.2 via Ollama
 db.tralicci.aggregate([
-  {
-    $vectorSearch: {
-      index: "tralicci_vector",       // indice Vector Search
+  { $vectorSearch: {
+      index: "tralicci_vector",
       path: "embedding",
-      queryVector: <vettore query>,   // embedding della stringa cercata dall'utente
+      queryVector: <vettore 768-dim>,
       numCandidates: 50,
       limit: 5
-    }
-  },
-  {
-    $project: {
-      codice: 1, nome: 1, tipologia: 1, regione: 1,
-      score: { $meta: "vectorSearchScore" }
-    }
-  }
+  }},
+  { $project: { codice:1, nome:1, tipologia:1, regione:1, score:{$meta:"vectorSearchScore"} } }
 ])
 ```
-*Mostra: ricerca semantica senza sistema esterno — l'utente scrive in linguaggio naturale e trova asset simili per significato, non solo per parole chiave*
+*Mostra: ricerca semantica nativa MongoDB, nessun sistema esterno, sintesi LLM in linguaggio naturale*
 
-**Indice da creare:**
+**Indice Vector Search:**
 ```json
 {
   "name": "tralicci_vector",
   "type": "vectorSearch",
   "definition": {
-    "fields": [{
-      "type": "vector",
-      "path": "embedding",
-      "numDimensions": 384,
-      "similarity": "cosine"
-    }]
+    "fields": [{ "type": "vector", "path": "embedding", "numDimensions": 768, "similarity": "cosine" }]
   }
 }
 ```
 
-**Generazione embedding nel seed:** usa `@xenova/transformers` (gira in Node.js, nessun server Python necessario):
-```js
-import { pipeline } from '@xenova/transformers';
-const embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
-const output = await embedder(testo, { pooling: 'mean', normalize: true });
-const embedding = Array.from(output.data); // float32[]
-```
-
 ---
 
-## Interfaccia Utente
+## Interfaccia Utente (3 Tab)
 
-### Layout
-```
-┌─────────────────────────────────────────┐
-│  TERNA Digital Twin  │ [Admin] [Monitor] │  ← Navbar top
-├─────────────────────────────────────────┤
-│                                         │
-│           Contenuto Tab attivo          │
-│                                         │
-└─────────────────────────────────────────┘
-```
+### Navbar
+Navbar fissa blu scuro (`#1e3a5f`) con logo Terna e 3 tab: **Admin | Anagrafica | Monitor**
 
 ### TAB 1: Admin
-- Bottone **"Inizializza Database"** → chiama `POST /api/seed`
-- Spinner durante il caricamento
-- Riquadro di feedback con i conteggi dopo il seed
+- Bottone "Inizializza Database" → `POST /api/seed`
+- Spinner durante il caricamento (può durare minuti per 10.000 tralicci + embedding Ollama)
+- Riquadro feedback con conteggi dopo il seed
 
-### TAB 2: Monitor
-Layout a due colonne:
+### TAB 2: Anagrafica
+Layout a due colonne: mappa Leaflet (sinistra) + pannello CRUD (destra, 440px).
 
-```
-┌──────────────────────┬──────────────────────┐
-│                      │  Query Panel         │
-│   Mappa Leaflet      │  [A] Geo $near       │
-│   (tralicci come     │  [B] Allarmi IoT     │
-│    pin colorati)     │  [C] Stats Cavi      │
-│                      │  [D] KPI $facet      │
-│                      │  [E] Full-Text Search│
-│                      │  [F] Vector Search   │
-│                      ├──────────────────────┤
-│                      │  Risultati query     │
-│                      │  (tabella o JSON)    │
-└──────────────────────┴──────────────────────┘
-```
+- Mappa mostra campione di 500 tralicci con pin colorati
+- Click su mappa → imposta coordinate nel form
+- Click su pin → seleziona traliccio per modifica
+- Lista paginata con ricerca testuale (50 per pagina)
+- CRUD completo: create, read, update, delete
+- **Panel "Apparati collegati"** (sotto il form, solo in modalità edit):
+  - IoT Box: batteria, telemetria (temp/umidità/vibrazione), allarmi attivi
+  - Tratte cavo DigiC adiacenti: codice, stato, temperatura, km
+  - Linea DigiL di appartenenza: nome linea, potenza, disponibilità
 
-**Query E (Full-Text):** mostra una input box di testo libero sopra il bottone.
-**Query F (Vector):** mostra una input box con placeholder "descrivi l'asset che cerchi..." — l'utente scrive in linguaggio naturale, il backend genera l'embedding e lancia `$vectorSearch`.
+### TAB 3: Monitor
+Layout a tre zone: bottoni query (sinistra) + mappa risultati (centro, 42%) + tabella risultati (destra/sotto).
+
+- 10 query button (A→J) con label descrittiva
+- Query B: input città + raggio km
+- Query I: input testo libero
+- Query J: input linguaggio naturale, risposta include sintesi LLM
+- Risultati mostrano tabella HTML dinamica + marker sulla mappa per query geospaziali
 
 **Colori pin mappa:**
 - Verde `#22c55e` → `attivo`
 - Arancione `#f97316` → `in_manutenzione`
 - Rosso `#ef4444` → `fuori_servizio`
-
-**Click su pin:** mostra un popup Leaflet con codice, tipologia, stato, regione.
 
 ---
 
@@ -424,40 +370,39 @@ Layout a due colonne:
 
 ### Prerequisiti
 - Node.js >= 18
-- MongoDB Atlas (free tier M0) oppure MongoDB locale sulla porta 27017
+- MongoDB replica set locale (o Atlas)
+- Ollama in esecuzione con i modelli `nomic-embed-text` e `llama3.2:latest`
 
-### Installazione
-```bash
-cd backend
-npm install express mongoose dotenv cors
-```
-
-### `.env`
+### `.env` (in `backend/`)
 ```
 MONGODB_URI=mongodb://mdb-admin:michele@work0.mongodb.local:30017,work1.mongodb.local:30018,work2.mongodb.local:30019/asset_management_terna?replicaSet=my-replica-set&tls=true&tlsAllowInvalidCertificates=true&authSource=admin
 PORT=3001
 OLLAMA_URL=http://localhost:11434
+OLLAMA_CHAT_MODEL=llama3.2:latest
 ```
 
-### Prerequisito Ollama
+### Installazione e Avvio
 ```bash
-ollama pull nomic-embed-text   # embedding 768-dim, ~274MB
-```
-
-### Avvio
-```bash
+cd backend
+npm install
 node server.js
-# Apri http://localhost:3001 nel browser
+# Apri http://localhost:3001
 ```
 
-> Express serve anche il frontend come static files — nessun server separato necessario.
+### Pull modelli Ollama
+```bash
+ollama pull nomic-embed-text   # 768-dim, ~274MB
+ollama pull llama3.2           # per sintesi Query J
+```
 
 ---
 
 ## Note Implementative
 
-1. **Ordine coordinate GeoJSON:** sempre `[longitude, latitude]`, non `[lat, lng]`. Leaflet usa `[lat, lng]` — converti quando passi dati alla mappa.
-2. **Indice 2dsphere:** va creato dopo `mongoose.connect()` o direttamente nello schema Mongoose con `index: '2dsphere'`.
-3. **Seed idempotente:** usa `deleteMany({})` prima di inserire, così il bottone Admin funziona più volte senza duplicati.
-4. **CORS:** `app.use(cors())` nel backend, prima delle route.
-5. **Risultati query nel frontend:** mostra una tabella HTML generata dinamicamente con `innerHTML` — più veloce che usare una libreria.
+1. **Ordine coordinate GeoJSON:** sempre `[longitude, latitude]` — Leaflet usa `[lat, lng]`, converti sempre.
+2. **Seed lento:** con 10.000 tralicci e embedding Ollama il seed può durare diversi minuti. Il batching è già implementato in `seed.js`.
+3. **Indici Atlas Search:** creati via `createSearchIndex` nel seed. Se la collection è vuota o l'indice esiste già, la creazione viene gestita senza crash.
+4. **`embedding: { select: false }`**: il campo embedding è escluso di default dalle query per non appesantire i risultati. Viene selezionato esplicitamente solo dove necessario.
+5. **CRUD Anagrafica:** le coordinate vengono inserite cliccando sulla mappa — il click setta i campi lat/lng nascosti nel form.
+6. **Campione mappa:** la mappa del tab Anagrafica e Monitor carica un campione di 500 tralicci random (`GET /api/tralicci`) per non appesantire il browser con 10.000 marker.
+7. **CORS:** `app.use(cors())` è attivo prima delle route in `server.js`.

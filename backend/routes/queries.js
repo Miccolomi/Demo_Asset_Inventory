@@ -65,6 +65,29 @@ router.get('/tralicci/:id', async (req, res) => {
   }
 });
 
+// ── DETTAGLI TRALICCIO (IoT Box + Tratte DigiC + Linea DigiL) ────────────────
+router.get('/tralicci/:id/details', async (req, res) => {
+  try {
+    const id = new mongoose.Types.ObjectId(req.params.id);
+
+    const traliccio = await Traliccio.findById(id).select('regione').lean();
+    if (!traliccio) return res.status(404).json({ error: 'Non trovato' });
+
+    const [iot, tratte, linea] = await Promise.all([
+      AggettIoTBox.findOne({ traliccio_collegato_id: id }).lean(),
+      DigiCBox.find({ $or: [{ traliccio_da_id: id }, { traliccio_a_id: id }] })
+        .select('codice stato temperatura_cavo_celsius corrente_ampere lunghezza_km tensione_kv traliccio_da_id traliccio_a_id')
+        .limit(5).lean(),
+      DigiLBox.findOne({ regioni_attraversate: traliccio.regione })
+        .select('codice nome_linea stato disponibilita_percentuale potenza_mw regioni_attraversate').lean()
+    ]);
+
+    res.json({ iot, tratte, linea });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.post('/tralicci', async (req, res) => {
   try {
     const { codice, nome, tipologia, tensione_kv, regione,
@@ -581,6 +604,76 @@ router.get('/query/iot-estrema', async (req, res) => {
     ]);
     res.json(results);
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── QUERY K — $graphLookup (catena elettrica) ─────────────────────────────────
+// Partendo da un traliccio, traversa in avanti la rete di tratte DigiC
+// mostrando la catena di segmenti cavo raggiungibili in N hop
+router.get('/query/grafo', async (req, res) => {
+  try {
+    const { codice, id, hops = 5 } = req.query;
+    if (!codice && !id) return res.status(400).json({ error: 'Parametro codice o id mancante' });
+
+    // maxDepth in $graphLookup conta da 0: maxDepth=N → N+1 segmenti trovati.
+    // Per avere esattamente "hops" segmenti passiamo hops-1.
+    const maxDepth = Math.min(19, Math.max(0, parseInt(hops) - 1));
+    const filter = id
+      ? { _id: new mongoose.Types.ObjectId(id) }
+      : { codice: codice.trim() };
+
+    const results = await Traliccio.aggregate([
+      { $match: filter },
+      {
+        $graphLookup: {
+          from: 'digic_box',
+          startWith: '$_id',
+          connectFromField: 'traliccio_a_id',
+          connectToField: 'traliccio_da_id',
+          as: 'catena',
+          maxDepth: maxDepth,
+          depthField: 'hop'
+        }
+      },
+      // Raccoglie tutti gli ID traliccio di destinazione nella catena
+      {
+        $lookup: {
+          from: 'tralicci',
+          let: { ids: { $map: { input: '$catena', as: 'c', in: '$$c.traliccio_a_id' } } },
+          pipeline: [
+            { $match: { $expr: { $in: ['$_id', '$$ids'] } } },
+            { $project: { codice: 1, tipologia: 1, regione: 1, stato_operativo: 1, tensione_kv: 1, gis_location: 1 } }
+          ],
+          as: 'tralicci_catena'
+        }
+      },
+      {
+        $project: {
+          codice: 1, nome: 1, tipologia: 1, regione: 1, stato_operativo: 1, tensione_kv: 1, gis_location: 1,
+          n_segmenti: { $size: '$catena' },
+          catena: {
+            $map: {
+              input: '$catena',
+              as: 'c',
+              in: {
+                hop:             '$$c.hop',
+                digic_codice:    '$$c.codice',
+                stato_cavo:      '$$c.stato',
+                temp_cavo:       '$$c.temperatura_cavo_celsius',
+                lunghezza_km:    '$$c.lunghezza_km',
+                traliccio_a_id:  '$$c.traliccio_a_id'
+              }
+            }
+          },
+          tralicci_catena: 1
+        }
+      }
+    ]);
+
+    if (!results.length) return res.status(404).json({ error: `Traliccio "${codice || id}" non trovato` });
+    res.json(results[0]);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 module.exports = router;

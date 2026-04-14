@@ -278,6 +278,17 @@ function openForm(mode, data = null) {
   document.getElementById('crud-list-view').style.display = 'none';
   document.getElementById('crud-form').style.display = 'flex';
 
+  // Pannello apparati: carica in edit, nasconde in new
+  const detPanel = document.getElementById('trl-details');
+  if (detPanel) {
+    if (mode === 'edit' && data?._id) {
+      loadTraliccioDetails(data._id);
+    } else {
+      detPanel.style.display = 'none';
+      detPanel.innerHTML = '';
+    }
+  }
+
   // Reset / populate
   document.getElementById('f-id').value          = data?._id || '';
   document.getElementById('f-codice').value      = data?.codice || '';
@@ -338,6 +349,8 @@ function closeForm() {
   if (STATE.mapAnag) STATE.mapAnag.getContainer().style.cursor = '';
   if (STATE.tempMarker) { STATE.mapAnag.removeLayer(STATE.tempMarker); STATE.tempMarker = null; }
   removeSelectedMarker();
+  const detPanel = document.getElementById('trl-details');
+  if (detPanel) { detPanel.style.display = 'none'; detPanel.innerHTML = ''; }
 }
 
 async function saveTraliccio() {
@@ -382,6 +395,96 @@ async function deleteTraliccio(id, codice) {
   } catch (e) { alert('Errore eliminazione'); }
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  ANAGRAFICA — PANNELLO DETTAGLI APPARATI COLLEGATI
+// ═══════════════════════════════════════════════════════════════
+async function loadTraliccioDetails(id) {
+  const panel = document.getElementById('trl-details');
+  panel.style.display = 'block';
+  panel.innerHTML = '<div style="color:#94a3b8; font-size:12px; padding:10px 0;">Caricamento apparati…</div>';
+  try {
+    const res  = await fetch(`/api/tralicci/${id}/details`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    renderTraliccioDetails(data);
+  } catch (e) {
+    panel.innerHTML = `<div style="color:#f87171; font-size:12px; padding:10px 0;">Errore caricamento: ${e.message}</div>`;
+  }
+}
+
+function renderTraliccioDetails({ iot, tratte, linea }) {
+  const panel = document.getElementById('trl-details');
+
+  let html = '<div style="font-size:10px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:.06em; margin-bottom:12px;">Apparati collegati</div>';
+
+  // ── IoT Box ─────────────────────────────────────────────────
+  if (iot) {
+    const batt  = iot.livello_batteria ?? 0;
+    const col   = batt < 20 ? '#ef4444' : batt < 50 ? '#f97316' : '#22c55e';
+    const alr   = iot.allarmi_attivi || [];
+    html += `<div style="background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:11px 12px; margin-bottom:9px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <span style="font-size:10px; font-weight:700; color:#7c3aed; text-transform:uppercase; letter-spacing:.05em;">IoT Box</span>
+        <span style="font-family:monospace; font-size:11px; color:#64748b;">${iot.codice}</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:7px;">
+        <span style="font-size:11px; color:#64748b; width:60px;">Batteria</span>
+        <div class="batt-bar" style="flex:1;"><div class="batt-fill" style="width:${batt}%; background:${col};"></div></div>
+        <span class="batt-num" style="color:${col};">${batt}%</span>
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:5px; margin-bottom:7px; font-size:11px; text-align:center;">
+        <div style="background:#f8fafc; border-radius:5px; padding:5px;">
+          <div style="font-weight:700; color:#1e293b;">${iot.telemetria?.temperatura_celsius?.toFixed(1) ?? '—'}°C</div>
+          <div style="color:#94a3b8; font-size:10px;">Temp</div>
+        </div>
+        <div style="background:#f8fafc; border-radius:5px; padding:5px;">
+          <div style="font-weight:700; color:#1e293b;">${iot.telemetria?.umidita_percentuale?.toFixed(0) ?? '—'}%</div>
+          <div style="color:#94a3b8; font-size:10px;">Umidità</div>
+        </div>
+        <div style="background:#f8fafc; border-radius:5px; padding:5px;">
+          <div style="font-weight:700; color:#1e293b;">${iot.telemetria?.vibrazione_hz?.toFixed(1) ?? '—'} Hz</div>
+          <div style="color:#94a3b8; font-size:10px;">Vibraz.</div>
+        </div>
+      </div>
+      ${alr.length
+        ? `<div style="display:flex; flex-wrap:wrap; gap:4px;">${alr.map(a => `<span class="badge-alarm">${a}</span>`).join('')}</div>`
+        : '<div style="font-size:11px; color:#16a34a;">✓ Nessun allarme</div>'}
+    </div>`;
+  } else {
+    html += '<div style="color:#94a3b8; font-size:12px; margin-bottom:9px;">Nessun IoT Box collegato</div>';
+  }
+
+  // ── Tratte DigiC ────────────────────────────────────────────
+  if (tratte && tratte.length) {
+    html += `<div style="background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:11px 12px; margin-bottom:9px;">
+      <div style="font-size:10px; font-weight:700; color:#1d4ed8; text-transform:uppercase; letter-spacing:.05em; margin-bottom:8px;">
+        Tratte cavo (${tratte.length})
+      </div>
+      ${tratte.map(t => {
+        const c = t.stato === 'guasto' ? '#ef4444' : t.stato === 'sovraccarico' ? '#f97316' : '#22c55e';
+        return `<div style="display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid #f1f5f9; font-size:11px; gap:6px;">
+          <span style="font-family:monospace; font-weight:600; flex-shrink:0;">${t.codice}</span>
+          <span style="color:#64748b; font-family:monospace;">${t.lunghezza_km?.toFixed(1) ?? '—'} km · ${t.temperatura_cavo_celsius?.toFixed(1) ?? '—'}°C</span>
+          <span style="background:${c}18; color:${c}; padding:1px 6px; border-radius:4px; font-weight:600; flex-shrink:0;">${t.stato}</span>
+        </div>`;
+      }).join('')}
+    </div>`;
+  } else {
+    html += '<div style="color:#94a3b8; font-size:12px; margin-bottom:9px;">Nessuna tratta cavo trovata</div>';
+  }
+
+  // ── Linea DigiL ─────────────────────────────────────────────
+  if (linea) {
+    html += `<div style="background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:11px 12px;">
+      <div style="font-size:10px; font-weight:700; color:#ea580c; text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px;">Linea elettrica</div>
+      <div style="font-size:12px; font-weight:700; color:#1e293b; margin-bottom:3px;">${linea.nome_linea}</div>
+      <div style="font-size:11px; color:#64748b;">${linea.codice} · ${linea.potenza_mw ?? '—'} MW · ${linea.disponibilita_percentuale ?? '—'}% disponibilità</div>
+    </div>`;
+  }
+
+  panel.innerHTML = html;
+}
+
 // Carica la lista quando si apre il tab Anagrafica
 const _origSwitch = switchTab;
 // Override: carica lista CRUD quando si attiva il tab anagrafica
@@ -414,6 +517,10 @@ async function reloadMonitorMarkers() {
       }).addTo(STATE.mapMonitor);
       m.bindPopup(`<b>${t.codice}</b><br>${t.tipologia}<br>${t.regione}<br>
         <span style="color:${COLORS[t.stato_operativo]}">${t.stato_operativo.replace(/_/g,' ')}</span>`);
+      m.on('click', () => {
+        const inp = document.getElementById('q-grafo-input');
+        if (inp) inp.value = t.codice;
+      });
       m._trlData = t;
       STATE.monitorMarkers.push(m);
     });
@@ -544,6 +651,15 @@ async function runQuery(type) {
       Ricerca semantica + generazione risposta AI in corso…
     </div>`;
   }
+  if (type === 'grafo') {
+    const codice = document.getElementById('q-grafo-input').value.trim();
+    const hops   = parseInt(document.getElementById('q-grafo-hops').value) || 5;
+    if (!codice) {
+      resultsDiv.innerHTML = '<div style="color:#f97316; padding:8px;">Clicca un traliccio sulla mappa oppure inserisci il codice</div>';
+      return;
+    }
+    url += `?codice=${encodeURIComponent(codice)}&hops=${hops}`;
+  }
 
   try {
     const res = await fetch(url, opts);
@@ -578,7 +694,8 @@ function renderResults(data, type, container) {
     'stress-regione': { label: 'Indice di stress infrastrutturale per regione',            op: 'G · $group cross-collection' },
     'iot-estrema':    { label: 'IoT fuori soglia con correlazione cavo adiacente',         op: 'H · telemetria IoT + DigiC' },
     search:           { label: 'Risultati ricerca full-text',                              op: 'I · Search · lucene.italian · fuzzy' },
-    semantic:         { label: 'Risultati ricerca semantica',                              op: 'J · $vectorSearch · cosine · Ollama' }
+    semantic:         { label: 'Risultati ricerca semantica',                              op: 'J · $vectorSearch · cosine · Ollama' },
+    grafo:            { label: 'Catena elettrica ($graphLookup)',                          op: 'K · $graphLookup · graph traversal' }
   };
   const meta = ops[type] || { label: '', op: '' };
 
@@ -627,6 +744,13 @@ function renderResults(data, type, container) {
       showResultMarkers(data);
       html += tableSearch(data);
       break;
+    case 'grafo': {
+      const allTrl = [data, ...(data.tralicci_catena || [])].filter(t => t.gis_location);
+      showResultMarkers(allTrl);
+      drawGrafoPolyline(data);
+      html += tableGrafo(data);
+      break;
+    }
     case 'semantic': {
       const rows = data.results || data;
       const summary = data.summary || null;
@@ -845,6 +969,75 @@ function tableStressRegione(rows) {
       </tr>`;
     }).join('')}</tbody>
   </table><div class="text-muted" style="margin-top:8px;">${rows.length} regioni · ordinate per temperatura decrescente</div>`;
+}
+
+// ── K: Catena elettrica $graphLookup ──────────────────────────────────────────
+function drawGrafoPolyline(data) {
+  if (!STATE.mapMonitor || !data.gis_location) return;
+  const byId = {};
+  (data.tralicci_catena || []).forEach(t => { byId[String(t._id)] = t; });
+  const catena = (data.catena || []).slice().sort((a, b) => a.hop - b.hop);
+  const pts = [[data.gis_location.coordinates[1], data.gis_location.coordinates[0]]];
+  catena.forEach(c => {
+    const t = byId[String(c.traliccio_a_id)];
+    if (t?.gis_location) pts.push([t.gis_location.coordinates[1], t.gis_location.coordinates[0]]);
+  });
+  if (pts.length > 1) {
+    const line = L.polyline(pts, { color: '#3b82f6', weight: 3, opacity: 0.85, dashArray: null }).addTo(STATE.mapMonitor);
+    STATE.geoResultMarkers.push(line);
+  }
+}
+
+function tableGrafo(data) {
+  const catena = (data.catena || []).slice().sort((a, b) => a.hop - b.hop);
+  const byId   = {};
+  (data.tralicci_catena || []).forEach(t => { byId[String(t._id)] = t; });
+
+  const totKm  = catena.reduce((s, c) => s + (c.lunghezza_km || 0), 0);
+  const critici = catena.filter(c => c.stato_cavo !== 'normale').length;
+
+  let html = `
+    <div style="display:flex; gap:10px; margin-bottom:12px; flex-wrap:wrap;">
+      <div style="background:#eff6ff; border-radius:8px; padding:10px 14px; border:1px solid #bfdbfe; text-align:center; min-width:80px;">
+        <div style="font-size:22px; font-weight:900; color:#1d4ed8;">${catena.length}</div>
+        <div style="font-size:11px; color:#64748b;">segmenti</div>
+      </div>
+      <div style="background:#f0fdf4; border-radius:8px; padding:10px 14px; border:1px solid #bbf7d0; text-align:center; min-width:80px;">
+        <div style="font-size:22px; font-weight:900; color:#16a34a;">${totKm.toFixed(1)}</div>
+        <div style="font-size:11px; color:#64748b;">km totali</div>
+      </div>
+      ${critici > 0 ? `<div style="background:#fef2f2; border-radius:8px; padding:10px 14px; border:1px solid #fecaca; text-align:center; min-width:80px;">
+        <div style="font-size:22px; font-weight:900; color:#dc2626;">${critici}</div>
+        <div style="font-size:11px; color:#64748b;">critici</div>
+      </div>` : ''}
+    </div>
+    <div style="font-size:12px; color:#475569; margin-bottom:10px;">
+      Partenza: <strong>${data.codice}</strong> · ${data.tipologia} · ${data.regione} · ${statoB(data.stato_operativo)}
+    </div>`;
+
+  if (!catena.length) {
+    return html + '<div style="color:#94a3b8; font-size:12px; padding:8px;">Nessuna tratta in avanti trovata — questo traliccio potrebbe essere al termine della linea</div>';
+  }
+
+  html += `<table class="res-table">
+    <thead><tr><th>Hop</th><th>Tratta</th><th>Stato cavo</th><th>T° cavo</th><th>Km</th><th>Traliccio dest.</th><th>Stato dest.</th></tr></thead>
+    <tbody>${catena.map(c => {
+      const dest = byId[String(c.traliccio_a_id)];
+      const cc   = c.stato_cavo === 'guasto' ? '#ef4444' : c.stato_cavo === 'sovraccarico' ? '#f97316' : '#22c55e';
+      return `<tr>
+        <td style="font-family:monospace; font-weight:700; color:#3b82f6;">${c.hop}</td>
+        <td style="font-family:monospace; font-size:11px;">${c.digic_codice}</td>
+        <td><span style="background:${cc}18; color:${cc}; padding:2px 7px; border-radius:4px; font-size:11px; font-weight:600;">${c.stato_cavo}</span></td>
+        <td style="font-family:monospace;">${c.temp_cavo?.toFixed(1) ?? '—'} °C</td>
+        <td style="font-family:monospace;">${c.lunghezza_km?.toFixed(1) ?? '—'}</td>
+        <td style="font-family:monospace; font-weight:700; font-size:11px;">${dest?.codice ?? '—'}</td>
+        <td>${dest ? statoB(dest.stato_operativo) : '—'}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table>
+  <div class="text-muted" style="margin-top:8px;">${catena.length} segmenti cavo · ${totKm.toFixed(1)}km · traversal in avanti con $graphLookup</div>`;
+
+  return html;
 }
 
 // ── H: IoT fuori soglia + cavo adiacente ──────────────────────────────────────
