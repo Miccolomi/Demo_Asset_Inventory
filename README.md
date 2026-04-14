@@ -10,7 +10,7 @@ Built as a Proof of Value to demonstrate MongoDB in action: geospatial queries, 
 
 The application loads a dataset of 10,000 transmission towers distributed across 7 Italian regions (Emilia-Romagna, Tuscany, Umbria, Lazio, Campania, Basilicata, Calabria), each linked to an IoT sensor box, a cable segment control unit, and a line-level control unit.
 
-A **Monitor** tab exposes 10 live MongoDB queries, each showcasing a different feature:
+A **Monitor** tab exposes 11 live MongoDB queries, each showcasing a different feature:
 
 | Query | Description | MongoDB Feature |
 |---|---|---|
@@ -24,10 +24,13 @@ A **Monitor** tab exposes 10 live MongoDB queries, each showcasing a different f
 | H | IoT out-of-threshold + hottest adjacent cable | Dual `$lookup` pipeline, multi-sensor correlation |
 | I | Full-text fuzzy search | Atlas Search, `lucene.italian` analyzer, fuzzy matching |
 | J | Semantic / natural language search | Vector Search (`$vectorSearch`, cosine similarity) + LLM response via Ollama |
+| K | Electrical chain traversal from a tower | `$graphLookup` — native graph traversal, no dedicated graph DB needed |
+
+Query K lets you click any tower on the map (or type a tower code), set a hop count, and MongoDB traverses the cable network forward through `digic_box` segments using `$graphLookup`. Results render as a hop-by-hop table and a **polyline drawn on the map** connecting the chain of towers.
 
 All query results are rendered both in a table and on an interactive **Leaflet map**, with automatic `fitBounds` on the result set.
 
-An **Admin** tab provides full CRUD on the tower registry with pagination and live text search.
+An **Anagrafica** tab provides full CRUD on the tower registry with pagination and live text search. Selecting a tower also shows a **connected assets panel**: the mounted IoT Box (battery, telemetry, alarms), adjacent cable segments (DigiC), and the regional power line (DigiL) — fetched in a single backend call.
 
 ---
 
@@ -37,7 +40,7 @@ An **Admin** tab provides full CRUD on the tower registry with pagination and li
 |---|---|
 | Database | MongoDB (replica set, Atlas Search, Vector Search) |
 | Backend | Node.js + Express.js + Mongoose |
-| Frontend | Vanilla JS + HTML + Tailwind CSS (no build step) |
+| Frontend | Vanilla JS + HTML + CSS (no build step) |
 | Maps | Leaflet.js |
 | Embeddings | Ollama — `nomic-embed-text` (768-dim) |
 | LLM | Ollama — `llama3.2` |
